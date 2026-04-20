@@ -1,178 +1,246 @@
-import { BASE_URL, DEMO_MODE } from "./config";
-import { MOCK_ORDERS, MOCK_SERVICES, MOCK_USER } from "./mockData";
+// ─────────────────────────────────────────────────────────────
+//  API SERVICE LAYER — Vercel Serverless + Supabase
+// ─────────────────────────────────────────────────────────────
 
-const delay = (ms = 500) => new Promise(r => setTimeout(r, ms));
+import { DEMO_MODE } from "./config";
 
-// ── GET user ─────────────────────────────────────────────────
-export async function fetchUser(userId) {
-  if (DEMO_MODE) { await delay(300); return MOCK_USER; }
-  const res  = await fetch(`${BASE_URL}/admin/users`);
-  const data = await res.json();
-  return (data.items ?? []).find(u => u.user_id === userId) ?? null;
+const delay = (ms = 500) => new Promise((r) => setTimeout(r, ms));
+
+// Safe fetch — handles empty responses and errors cleanly
+async function safeFetch(url, options) {
+  try {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    const text = await res.text();
+    if (!text || text.trim() === "") return { success: true };
+    try { return JSON.parse(text); } catch { return { success: true }; }
+  } catch (e) {
+    console.error("API error:", url, e.message);
+    throw e;
+  }
 }
 
-// ── GET orders for customer ───────────────────────────────────
+// ── AUTH: Login ───────────────────────────────────────────────
+export async function loginUser(phone, password) {
+  if (DEMO_MODE) {
+    await delay(600);
+    const DEMO_USERS = [
+      { user_id:1, name:"Ali Hassan",      phone:"03001234567", password:"password123", role:"customer", address:"House 12, Block C, Faisalabad" },
+      { user_id:3, name:"Mohammad Waseem", phone:"03211112222", password:"password123", role:"dhobi",    address:"Shop 5, Gol Chakkar, Faisalabad" },
+      { user_id:5, name:"Admin User",      phone:"03000000001", password:"password123", role:"admin",    address:"Head Office, Islamabad" },
+    ];
+    const u = DEMO_USERS.find(u => u.phone === phone && u.password === password);
+    if (!u) return null;
+    const { password: _, ...user } = u;
+    return user;
+  }
+  const data = await safeFetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phone, password }),
+  });
+  if (!data || data.success !== 1) return null;
+  return {
+    user_id: data.user_id,
+    name:    data.name,
+    role:    data.role,
+    address: data.address,
+    phone,
+  };
+}
+
+// ── AUTH: Signup ──────────────────────────────────────────────
+export async function signupUser({ name, phone, password, role, address }) {
+  if (DEMO_MODE) { await delay(700); return { user_id: Date.now(), name, phone, role, address }; }
+  const data = await safeFetch("/api/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, phone, password, role, address }),
+  });
+  if (!data || data.success !== 1) return null;
+  return { user_id: data.user_id, name: data.name, role: data.role, address: data.address, phone };
+}
+
+// ── GET all orders for a customer (with items) ────────────────
 export async function fetchOrders(userId) {
-  if (DEMO_MODE) { await delay(600); return MOCK_ORDERS; }
-  const res    = await fetch(`${BASE_URL}/orders?user_id=${userId}`);
-  if (!res.ok) throw new Error("Failed to load orders");
-  const data   = await res.json();
+  if (!userId) return [];
+  if (DEMO_MODE) { await delay(600); return []; }
+  const data = await safeFetch(`/api/orders?user_id=${userId}`);
   const orders = data.items ?? [];
-  return Promise.all(orders.map(async o => {
-    const r = await fetch(`${BASE_URL}/order-items?order_id=${o.order_id}`);
-    const d = await r.json();
-    return { ...o, items: d.items ?? [] };
+  return Promise.all(orders.map(async (o) => {
+    try {
+      const r = await safeFetch(`/api/order-items?order_id=${o.order_id}`);
+      return { ...o, items: r.items ?? [] };
+    } catch { return { ...o, items: [] }; }
   }));
 }
 
-// ── GET order detail ──────────────────────────────────────────
-export async function fetchOrderDetail(orderId) {
-  if (DEMO_MODE) { await delay(400); return MOCK_ORDERS.find(o => o.order_id === orderId) ?? null; }
-  const res  = await fetch(`${BASE_URL}/orders?order_id=${orderId}`);
-  const data = await res.json();
-  return data.items?.[0] ?? null;
-}
-
-// ── GET status log ────────────────────────────────────────────
+// ── GET delivery status log ───────────────────────────────────
 export async function fetchStatusLog(orderId) {
-  if (DEMO_MODE) { await delay(300); return MOCK_ORDERS.find(o => o.order_id === orderId)?.status_log ?? []; }
-  const res  = await fetch(`${BASE_URL}/order-log?order_id=${orderId}`);
-  if (!res.ok) throw new Error("Failed to load status log");
-  const data = await res.json();
+  if (DEMO_MODE) { await delay(300); return []; }
+  const data = await safeFetch(`/api/order-log?order_id=${orderId}`);
   return data.items ?? [];
 }
 
-// ── GET services ──────────────────────────────────────────────
+// ── GET all active services ───────────────────────────────────
 export async function fetchServices() {
-  if (DEMO_MODE) { await delay(300); return MOCK_SERVICES; }
-  const res  = await fetch(`${BASE_URL}/services`);
-  if (!res.ok) throw new Error("Failed to load services");
-  const data = await res.json();
+  if (DEMO_MODE) { await delay(300); return []; }
+  const data = await safeFetch("/api/services");
   return data.items ?? [];
 }
 
-// ── GET dhobis ────────────────────────────────────────────────
-export async function fetchDhobis() {
-  if (DEMO_MODE) {
-    await delay(300);
-    return [
-      { user_id:4, name:"Mohammad Waseem", phone:"03211112222", address:"Shop 5, Gol Chakkar, Faisalabad" },
-      { user_id:5, name:"Asif Laundry",    phone:"03333334444", address:"Main Market, Gulberg, Lahore" },
-    ];
-  }
-  const res  = await fetch(`${BASE_URL}/dhobis`);
-  if (!res.ok) throw new Error("Failed to load dhobis");
-  const data = await res.json();
-  return data.items ?? [];
-}
-
-// ── POST place order ──────────────────────────────────────────
+// ── POST place a new order ────────────────────────────────────
 export async function placeOrder(payload) {
-  if (DEMO_MODE) {
-    await delay(900);
-    return { success: true, order_id: Math.max(...MOCK_ORDERS.map(o => o.order_id)) + 1 };
-  }
-  const res = await fetch(`${BASE_URL}/place-order`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
+  if (DEMO_MODE) { await delay(900); return { success: true, order_id: Date.now() }; }
+
+  // Step 1: create order header
+  const orderData = await safeFetch("/api/place-order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       user_id:        payload.user_id,
       pickup_date:    payload.pickup_date,
       time_slot:      payload.time_slot,
       address:        payload.address,
-      notes:          payload.notes,
-      pickup_type:    payload.pickup_type,
-      return_type:    payload.return_type,
-      payment_method: payload.payment_method,
+      notes:          payload.notes ?? "",
+      pickup_type:    payload.pickup_type ?? "pickup",
+      return_type:    payload.return_type ?? "deliver",
+      payment_method: payload.payment_method ?? "COD",
     }),
   });
-  if (!res.ok) throw new Error("Failed to place order");
-  const data = await res.json();
-  const orderId = data.order_id;
 
+  const orderId = orderData?.order_id;
+  if (!orderId) throw new Error("Order created but no order_id returned");
+
+  // Step 2: insert each item
   for (const item of payload.items) {
-    await fetch(`${BASE_URL}/add-item`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ order_id: orderId, cloth_type: item.cloth_type, quantity: item.quantity, service_id: item.service_id, price: item.price }),
+    await safeFetch("/api/add-item", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        order_id:   orderId,
+        cloth_type: item.cloth_type,
+        quantity:   item.quantity,
+        service_id: item.service_id,
+        price:      item.price,
+      }),
     });
   }
+
   return { success: true, order_id: orderId };
 }
 
 // ── GET unassigned orders ─────────────────────────────────────
 export async function fetchUnassignedOrders() {
-  if (DEMO_MODE) {
-    await delay(500);
-    return [
-      { order_id:10, order_date:new Date().toISOString(), pickup_date:new Date(Date.now()+86400000).toISOString(), status:"Pending", total_amount:320, notes:"Handle with care", customer_name:"Fatima Noor", customer_phone:"03001112222", customer_address:"Plot 5, Gulberg, Faisalabad", time_slot:"10AM-12PM", pickup_address:"Plot 5, Gulberg, Faisalabad", items:[{cloth_type:"Shirt",quantity:2,service_name:"Wash & Iron",line_total:160},{cloth_type:"Jeans",quantity:2,service_name:"Wash & Iron",line_total:160}] },
-      { order_id:11, order_date:new Date().toISOString(), pickup_date:new Date(Date.now()+86400000).toISOString(), status:"Pending", total_amount:150, notes:null,              customer_name:"Omar Butt",   customer_phone:"03009998888", customer_address:"House 8, Canal Road, Faisalabad",   time_slot:"2PM-4PM",  pickup_address:"House 8, Canal Road, Faisalabad",   items:[{cloth_type:"Suit",quantity:1,service_name:"Dry Clean",line_total:150}] },
-    ];
-  }
-  const res  = await fetch(`${BASE_URL}/unassigned-orders`);
-  if (!res.ok) throw new Error("Failed to load unassigned orders");
-  const data = await res.json();
+  if (DEMO_MODE) { await delay(500); return []; }
+  const data = await safeFetch("/api/unassigned-orders");
   const orders = data.items ?? [];
-  return Promise.all(orders.map(async o => {
-    const r = await fetch(`${BASE_URL}/order-items?order_id=${o.order_id}`);
-    const d = await r.json();
-    return { ...o, items: d.items ?? [] };
+  return Promise.all(orders.map(async (o) => {
+    try {
+      const r = await safeFetch(`/api/order-items?order_id=${o.order_id}`);
+      return { ...o, items: r.items ?? [] };
+    } catch { return { ...o, items: [] }; }
   }));
 }
 
-// ── GET dhobi assigned orders ─────────────────────────────────
+// ── GET dhobi's assigned orders ───────────────────────────────
 export async function fetchDhobiOrders(dhobiId) {
-  if (DEMO_MODE) {
-    await delay(500);
-    return [{ order_id:1, order_date:new Date(Date.now()-86400000).toISOString(), pickup_date:new Date().toISOString(), status:"Washing", total_amount:400, notes:"Use mild detergent", customer_name:"Ali Hassan", customer_phone:"03001234567", customer_address:"House 12, Block C, Faisalabad", time_slot:"8AM-10AM", pickup_address:"House 12, Block C, Faisalabad", items:[{cloth_type:"Shirt",quantity:3,service_name:"Wash & Iron",line_total:240},{cloth_type:"Jeans",quantity:2,service_name:"Wash & Iron",line_total:160}] }];
-  }
-  const res  = await fetch(`${BASE_URL}/dhobi-orders?dhobi_id=${dhobiId}`);
-  if (!res.ok) throw new Error("Failed to load dhobi orders");
-  const data = await res.json();
+  if (!dhobiId) return [];
+  if (DEMO_MODE) { await delay(500); return []; }
+  const data = await safeFetch(`/api/dhobi-orders?dhobi_id=${dhobiId}`);
   const orders = data.items ?? [];
-  return Promise.all(orders.map(async o => {
-    const r = await fetch(`${BASE_URL}/order-items?order_id=${o.order_id}`);
-    const d = await r.json();
-    return { ...o, items: d.items ?? [] };
+  return Promise.all(orders.map(async (o) => {
+    try {
+      const r = await safeFetch(`/api/order-items?order_id=${o.order_id}`);
+      return { ...o, items: r.items ?? [] };
+    } catch { return { ...o, items: [] }; }
   }));
 }
 
 // ── POST accept order ─────────────────────────────────────────
 export async function acceptOrder(orderId, dhobiId) {
   if (DEMO_MODE) { await delay(700); return { success: true }; }
-  const res = await fetch(`${BASE_URL}/accept-order`, {
+  await safeFetch("/api/accept-order", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ order_id: orderId, dhobi_id: dhobiId }),
   });
-  if (!res.ok) throw new Error("Failed to accept order");
   return { success: true };
 }
 
 // ── POST update order status ──────────────────────────────────
 export async function updateOrderStatus(orderId, newStatus, updatedBy) {
   if (DEMO_MODE) { await delay(500); return { success: true }; }
-  const res = await fetch(`${BASE_URL}/update-status`, {
+  await safeFetch("/api/update-status", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ order_id: orderId, new_status: newStatus, updated_by: updatedBy }),
   });
-  if (!res.ok) throw new Error("Failed to update status");
   return { success: true };
 }
 
 // ── GET demand forecast ───────────────────────────────────────
 export async function fetchDemandForecast() {
-  if (DEMO_MODE) {
-    await delay(400);
-    return [
-      { day_name:"Monday",    day_num:1, order_count:8  },
-      { day_name:"Tuesday",   day_num:2, order_count:6  },
-      { day_name:"Wednesday", day_num:3, order_count:11 },
-      { day_name:"Thursday",  day_num:4, order_count:9  },
-      { day_name:"Friday",    day_num:5, order_count:14 },
-      { day_name:"Saturday",  day_num:6, order_count:22 },
-      { day_name:"Sunday",    day_num:0, order_count:19 },
-    ];
-  }
-  const res  = await fetch(`${BASE_URL}/demand-forecast`);
-  if (!res.ok) throw new Error("Failed to load forecast");
-  const data = await res.json();
+  if (DEMO_MODE) { await delay(400); return []; }
+  const data = await safeFetch("/api/demand-forecast");
+  return data.items ?? [];
+}
+
+// ── GET all dhobis ────────────────────────────────────────────
+export async function fetchDhobis() {
+  if (DEMO_MODE) { await delay(300); return []; }
+  const data = await safeFetch("/api/dhobis");
+  return data.items ?? [];
+}
+
+// ── ADMIN: GET all users ──────────────────────────────────────
+export async function fetchAllUsers() {
+  if (DEMO_MODE) { await delay(400); return []; }
+  const data = await safeFetch("/api/admin/users");
+  return data.items ?? [];
+}
+
+// ── ADMIN: POST add user ──────────────────────────────────────
+export async function addUser(payload) {
+  if (DEMO_MODE) { await delay(400); return { success: true }; }
+  await safeFetch("/api/admin/users", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return { success: true };
+}
+
+// ── ADMIN: GET all orders ─────────────────────────────────────
+export async function fetchAllOrders() {
+  if (DEMO_MODE) { await delay(500); return []; }
+  const data = await safeFetch("/api/admin/all-orders");
+  return data.items ?? [];
+}
+
+// ── ADMIN: POST assign dhobi ──────────────────────────────────
+export async function adminAssignDhobi(orderId, dhobiId) {
+  if (DEMO_MODE) { await delay(600); return { success: true }; }
+  await safeFetch("/api/admin/assign-dhobi", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ order_id: orderId, dhobi_id: dhobiId }),
+  });
+  return { success: true };
+}
+
+// ── ADMIN: POST update service price ─────────────────────────
+export async function updateServicePrice(serviceId, price) {
+  if (DEMO_MODE) { await delay(400); return { success: true }; }
+  await safeFetch("/api/admin/update-price", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ service_id: serviceId, price }),
+  });
+  return { success: true };
+}
+
+// ── ADMIN: GET revenue analytics ──────────────────────────────
+export async function fetchRevenue() {
+  if (DEMO_MODE) { await delay(400); return []; }
+  const data = await safeFetch("/api/admin/revenue");
   return data.items ?? [];
 }
